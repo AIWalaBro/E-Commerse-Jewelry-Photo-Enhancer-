@@ -1,0 +1,7 @@
+{
+  "name": "Jewelry Photo Enhancer version 3",
+  "description": "An AI-powered tool to transform jewelry photos into professional, studio-quality images for e-commerce.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
