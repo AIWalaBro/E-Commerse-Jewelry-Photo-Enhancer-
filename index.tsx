@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 
 interface ImagePair {
   id: string;
+  sourceId: string; // ID of the original uploaded image
   original: string; // dataURL for preview
   originalFile: File;
   enhanced: string | null;
@@ -40,6 +41,7 @@ const defaultCustomSettings: CustomSettings = {
 
 const App: React.FC = () => {
   const [imagePairs, setImagePairs] = useState<ImagePair[]>([]);
+  const [imageCounter, setImageCounter] = useState<number>(1);
   const [likedImages, setLikedImages] = useState<ImagePair[]>([]);
   const [enhancingMode, setEnhancingMode] = useState<'auto' | 'custom' | null>(null);
   const [progress, setProgress] = useState<{ completed: number; total: number }>({ completed: 0, total: 0 });
@@ -117,28 +119,87 @@ const App: React.FC = () => {
     });
   };
 
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files) return;
+  const getOrnamentType = async (imageFile: File): Promise<string> => {
+    const MAX_RETRIES = 3;
+    const INITIAL_RETRY_DELAY_MS = 1000;
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! }); // Initialize once outside loop
 
-    const newPairs: ImagePair[] = Array.from(files).map((file, index) => {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const base64ImageData = await fileToBase64(imageFile);
+            const prompt = "Analyze this image of a jewelry item. Briefly describe its main subject or shape (e.g., 'Snake', 'Flower', 'Solitaire'). Respond with only the one or two most descriptive words, capitalized.";
+            
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: { parts: [{ inlineData: { data: base64ImageData, mimeType: imageFile.type } }, { text: prompt }] },
+                config: { thinkingConfig: { thinkingBudget: 0 } }
+            });
+            
+            const ornamentType = response.text.trim().replace(/[^a-zA-Z\s]/g, ''); // Sanitize
+            
+            if (ornamentType && ornamentType.length > 2 && ornamentType.length < 25) {
+                return ornamentType; // Success!
+            }
+            // If we get a valid response but it's not a good ornament name, don't retry.
+            // Just fall back gracefully. The API didn't error out.
+            console.warn(`AI returned an unusual ornament type: "${ornamentType}". Using fallback.`);
+            return "Jewelry";
+
+        } catch (error) {
+            console.error(`Attempt ${attempt} failed to identify ornament type:`, error);
+            if (attempt === MAX_RETRIES) {
+                console.error("All attempts to identify ornament type failed. Using fallback.");
+                // The loop will end, and the final fallback will be returned outside.
+                break;
+            }
+            // Wait with exponential backoff before the next attempt.
+            const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+
+    return "Jewelry"; // This is the final fallback if all retries fail.
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    
+    const currentCounter = imageCounter;
+    
+    setToastMessage(`Identifying ${files.length} image(s)...`);
+
+    const newPairsPromises = Array.from(files).map(async (file, index) => {
        if (!file.type.startsWith('image/')) {
         console.warn(`Skipping non-image file: ${file.name}`);
         return null;
       }
+      const newId = `${file.name}-${Date.now()}-${index}`;
+      const ornamentType = await getOrnamentType(file);
+
       return {
-        id: `${file.name}-${Date.now()}-${index}`,
+        id: newId,
+        sourceId: newId,
         original: URL.createObjectURL(file),
         originalFile: file,
         enhanced: null,
         isLoading: false,
         error: null,
         isSelected: false,
-        title: `Original View ${imagePairs.length + index + 1}`
+        title: `Original ${ornamentType} View ${currentCounter + index}`
       };
-    }).filter((pair): pair is ImagePair => pair !== null);
+    });
     
-    setImagePairs(prev => [...prev, ...newPairs]);
+    const resolvedPairs = await Promise.all(newPairsPromises);
+    const newPairs = resolvedPairs.filter((pair): pair is ImagePair => pair !== null);
+    
+    if (newPairs.length > 0) {
+      setImageCounter(currentCounter + newPairs.length);
+      setImagePairs(prev => [...prev, ...newPairs]);
+      setToastMessage(`${newPairs.length} image(s) added.`);
+    } else {
+      setToastMessage(''); // Clear loading toast if no valid images
+    }
     
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -235,30 +296,47 @@ const App: React.FC = () => {
   }
 
   const handleAutoEnhance = async () => {
-    const uploadedPairs = imagePairs.filter(p => !p.enhanced && !p.isLoading);
-    if (uploadedPairs.length === 0 || enhancingMode) return;
+    const sourceIdsWithResults = new Set(imagePairs.filter(p => p.id !== p.sourceId).map(p => p.sourceId));
+    const sourcePairsToProcess = imagePairs.filter(p => p.id === p.sourceId && !sourceIdsWithResults.has(p.id));
+
+    if (sourcePairsToProcess.length === 0 || enhancingMode) return;
 
     setEnhancingMode('auto');
-    setProgress({ completed: 0, total: uploadedPairs.length });
+    setProgress({ completed: 0, total: sourcePairsToProcess.length });
 
-    const idsToProcess = new Set(uploadedPairs.map(p => p.id));
-    setImagePairs(prev =>
-      prev.map(p =>
-        idsToProcess.has(p.id) ? { ...p, isLoading: true, error: null } : p
-      )
-    );
     const basePrompt = `You are an expert jewelry photo retoucher.
-     Your task is to enhance the provided image of a jewelry ornament for a high-end e-commerce website. Follow these instructions precisely: Enhance this photo of jewelry to look like a professional studio shoot. Use soft, luxurious lighting, remove background clutter, and place the jewelry on a rich velvet cloth or marble surface. Add subtle reflections and shadows to highlight shine and texture. Make it suitable for e-commerce display with high clarity and elegance.
-
+     Your task is to enhance the provided image of a jewelry ornament for a high-end e-commerce website. Follow these instructions precisely:
+     1.  **Completely remove the original background.** Ensure no part of the original background is visible.
+     2.  Place the jewelry on a new, clean background. Choose either a rich velvet cloth or a marble surface, whichever best suits the item.
+     3.  Apply soft, luxurious lighting to highlight shine and texture.
+     4.  Add subtle reflections and shadows for realism.
+     The final image must have high clarity and elegance, suitable for a professional e-commerce display.
     `;
+    
+    const newResultPairs: ImagePair[] = [];
+    const jobs: {pair: ImagePair, prompt: string}[] = [];
 
-    // const basePrompt = `Task: Act as an expert jewelry image retoucher.
-    // 1.  **Inspect and Correct Imperfections:** Identify and remove any scratches, blemishes, dust, or surface flaws on the ornament. The final image must display a flawless, clean, and polished surface, making the jewelry look brand new.
-    // 2.  **Preserve Orientation and Angle:** Maintain the exact perspective and angle of the original photo. The enhanced output must match the orientation and position as seen in the input image. Do not change the camera angle.
-    // 3.  **Accurately Render Material and Gemstones:** Precisely detect and retain the original material and color. If the ornament is silver, produce a realistic silver color. If it's gold, reflect the correct gold hue. For any diamonds or gemstones, enhance their sparkle and clarity so they appear vivid and sharp, but do not change the stone type, color, or cut.
-    // 4.  **Produce a High-Quality Studio-Ready Image:** Enhance the background, lighting, and clarity to professional e-commerce standards. Place the ornament on a clean, luxurious surface (like dark velvet or soft marble) with natural shadows and crisp details. The final image should be visually appealing without altering the essential attributes of the jewelry.`;
+    sourcePairsToProcess.forEach(sourcePair => {
+      const newPair: ImagePair = {
+        ...sourcePair,
+        id: `${sourcePair.id}-res-auto`,
+        sourceId: sourcePair.id,
+        enhancedTitle: 'Enhanced',
+        isLoading: true,
+        enhanced: null,
+        error: null,
+        isSelected: false,
+      };
+      newResultPairs.push(newPair);
+      jobs.push({ pair: newPair, prompt: basePrompt });
+    });
 
-    const jobs: {pair: ImagePair, prompt: string}[] = uploadedPairs.map(p => ({ pair: p, prompt: basePrompt }));
+    if (jobs.length === 0) {
+      setEnhancingMode(null);
+      return;
+    }
+
+    setImagePairs(currentPairs => [...currentPairs, ...newResultPairs]);
 
     await runEnhancement(jobs, undefined, () => {
         setProgress(prev => ({ ...prev, completed: prev.completed + 1 }));
@@ -266,82 +344,96 @@ const App: React.FC = () => {
 
     setEnhancingMode(null);
     setProgress({ completed: 0, total: 0 });
-
-    setImagePairs(currentPairs => 
-        currentPairs.map(p => 
-            (p.enhanced || p.error) ? { ...p, isLoading: false } : p
-        )
-    );
   };
 
   const handleCustomEnhance = async () => {
       setIsCustomModalOpen(false);
-      const uploadedPairs = imagePairs.filter(p => !p.enhanced && !p.isLoading);
-      if (uploadedPairs.length === 0 || enhancingMode) return;
-      
+      const sourceIdsWithResults = new Set(imagePairs.filter(p => p.id !== p.sourceId).map(p => p.sourceId));
+      const sourcePairs = imagePairs.filter(p => p.id === p.sourceId && !sourceIdsWithResults.has(p.id));
+
+      if (sourcePairs.length === 0 || enhancingMode) return;
+
       let baseTask = '';
       if (customSettings.material === 'auto') {
-          baseTask = `Task: Enhance this jewelry photo for e-commerce. The ornament’s material and color should be faithfully preserved as seen in the image. The output must have high clarity, flawless presentation, and elegant studio quality.`;
+          baseTask = `Task: Enhance this jewelry photo for e-commerce. The ornament’s material and color should be faithfully preserved as seen in the image.`;
       } else {
-          baseTask = `Task: Transform the jewelry in the provided photo to be made of high-quality, polished ${customSettings.material}. Faithfully preserve the exact physical structure, dimensions, and design details of the ornament, but change its material. The output must have high clarity, flawless presentation, and elegant studio quality, realistically rendering the new ${customSettings.material} material.`;
+          baseTask = `Task: Transform the jewelry in the provided photo to be made of high-quality, polished ${customSettings.material}. Faithfully preserve the exact physical structure, dimensions, and design details of the ornament, but change its material. Realistically render the new ${customSettings.material} material.`;
       }
       
-      let styleRequirements = `Style requirements:\n`;
-      switch (customSettings.lighting) {
-          case 'dramatic': styleRequirements += 'Lighting: Use dramatic, bold lighting with high contrast and deep shadows.\n'; break;
-          case 'natural': styleRequirements += 'Lighting: Use clean and natural lighting, like from a soft daylight window.\n'; break;
-          case 'highKey': styleRequirements += 'Lighting: Use high-key lighting for a bright, airy, and shadowless look.\n'; break;
-          case 'shadowed': styleRequirements += 'Lighting: Use specific, directed lighting to create long, artistic shadows.\n'; break;
-          default: styleRequirements += 'Lighting: Use soft, luxurious lighting to highlight shine and texture.\n'; break;
-      }
+      let backgroundInstruction = '';
       switch (customSettings.background) {
-          case 'marble': styleRequirements += 'Background: Place the jewelry on a clean white or black marble surface.'; break;
-          case 'abstract': styleRequirements += 'Background: Place the jewelry on a minimal, abstract, out-of-focus background.'; break;
-          case 'whiteStudio': styleRequirements += 'Background: Place the jewelry against a seamless, pure white studio background.'; break;
-          case 'gradient': styleRequirements += 'Background: Place the jewelry against a subtle, elegant color gradient background.'; break;
-          default: styleRequirements += 'Background: Place the jewelry on a rich, dark velvet cloth.'; break;
+          case 'marble': backgroundInstruction = 'Place the jewelry on a clean white or black marble surface.'; break;
+          case 'abstract': backgroundInstruction = 'Place the jewelry on a minimal, abstract, out-of-focus background.'; break;
+          case 'whiteStudio': backgroundInstruction = 'Place the jewelry against a seamless, pure white studio background.'; break;
+          case 'gradient': backgroundInstruction = 'Place the jewelry against a subtle, elegant color gradient background.'; break;
+          default: backgroundInstruction = 'Place the jewelry on a rich, dark velvet cloth.'; break;
+      }
+      
+      let lightingInstruction = '';
+       switch (customSettings.lighting) {
+          case 'dramatic': lightingInstruction = 'Use dramatic, bold lighting with high contrast and deep shadows.'; break;
+          case 'natural': lightingInstruction = 'Use clean and natural lighting, like from a soft daylight window.'; break;
+          case 'highKey': lightingInstruction = 'Use high-key lighting for a bright, airy, and shadowless look.'; break;
+          case 'shadowed': lightingInstruction = 'Use specific, directed lighting to create long, artistic shadows.'; break;
+          default: lightingInstruction = 'Use soft, luxurious lighting to highlight shine and texture.'; break;
       }
 
-      const stylePrompt = `${baseTask}\n${styleRequirements}`;
+      const stylePrompt = `
+        **Primary Goal:** First and most importantly, completely remove the original background. Isolate the jewelry perfectly, then place it onto a new background as described. Ensure no part of the original background is visible.
 
-      let jobs: {pair: ImagePair, prompt: string}[] = [];
-      const newGeneratedPairs: ImagePair[] = [];
-
-      // Add jobs to enhance the originally uploaded images if 'Front View' is checked
-      if (customSettings.angles.front) {
-          uploadedPairs.forEach(p => jobs.push({ pair: p, prompt: stylePrompt }));
-      }
+        ${baseTask}
+        
+        **Style requirements:**
+        - Background: ${backgroundInstruction}
+        - Lighting: ${lightingInstruction}
+        
+        The final output must have high clarity, flawless presentation, and elegant studio quality.`;
+      
+      const jobs: {pair: ImagePair, prompt: string}[] = [];
+      const newResultPairs: ImagePair[] = [];
 
       const anglePrompts = {
-        side: "Task: Re-render the jewelry from a realistic side-view camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
-        top: "Task: Re-render the jewelry from a realistic top-down camera angle (bird's-eye view). Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
-        threeQuarter: "Task: Re-render the jewelry from a realistic three-quarter (3/4) camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
-        closeUp: "Task: Generate a detailed close-up macro shot of the jewelry, focusing on a key area of craftsmanship like the gemstone setting or clasp. You must preserve the exact physical structure, materials, and design details of the ornament shown in the original image. Do not change the object's shape. The goal is a photorealistic zoomed-in view of the *same object*.",
-        back: "Task: Re-render the jewelry from a realistic back-view camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image, logically inferring the appearance of the back. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*."
+        side: "Task: Re-render the jewelry from a realistic side-view camera angle. You must preserve the exact physical structure, dimensions, materials, and design details visible in the original. **Do not invent complex details or add markings that are not suggested by the original object.** The goal is a photorealistic, believable change in perspective of the *same object*.",
+        top: "Task: Re-render the jewelry from a realistic top-down camera angle (bird's-eye view). You must preserve the exact physical structure, dimensions, materials, and design details visible in the original. **Do not invent complex details or add markings that are not suggested by the original object.** The goal is a photorealistic, believable change in perspective of the *same object*.",
+        threeQuarter: "Task: Re-render the jewelry from a realistic three-quarter (3/4) camera angle. You must preserve the exact physical structure, dimensions, materials, and design details visible in the original. **Do not invent complex details or add markings that are not suggested by the original object.** The goal is a photorealistic, believable change in perspective of the *same object*.",
+        closeUp: "Task: Generate a detailed close-up macro shot of the jewelry, focusing on a key area of craftsmanship. You must preserve the exact physical structure, materials, and design details of the ornament shown in the original image. **Do not change the object's shape or invent details.** The goal is a photorealistic zoomed-in view of the *same object*.",
+        back: "Task: Re-render the jewelry from a realistic back-view camera angle. You must preserve the exact physical structure, dimensions, materials, and design details visible in the original. When inferring the appearance of the back, create a simple and plausible design that is consistent with the front. **Do not invent complex details or add markings that are not suggested by the original object.** The goal is a photorealistic, believable change in perspective of the *same object*."
       };
-      
-      // Generate new angles for EACH uploaded image
-      uploadedPairs.forEach(sourcePair => {
-          (Object.keys(anglePrompts) as (keyof typeof anglePrompts)[]).forEach(angle => {
-              const angleKey = angle as keyof CustomSettings['angles'];
-              if (customSettings.angles[angleKey]) {
-                  const enhancedTitle = `Generated ${angle.charAt(0).toUpperCase() + angle.slice(1).replace(/([A-Z])/g, ' $1')} View`;
-                  const newPair: ImagePair = { 
-                      ...sourcePair, 
-                      id: `${sourcePair.id}-gen-${angle}`, 
-                      title: sourcePair.title,
-                      enhancedTitle: enhancedTitle,
-                      isLoading: true, 
-                      enhanced: null, 
-                      error: null, 
-                      isSelected: false 
-                  };
-                  newGeneratedPairs.push(newPair);
-                  const angleGenPrompt = `Based on the provided image, ${anglePrompts[angle]}. Then, enhance this newly generated view using these style requirements:\n${stylePrompt}`;
-                  jobs.push({ pair: newPair, prompt: angleGenPrompt });
+
+      const allAngleKeys = ['front', ...Object.keys(anglePrompts)] as const;
+
+      sourcePairs.forEach(sourcePair => {
+          const anglesToGenerate = allAngleKeys.filter(angle => customSettings.angles[angle as keyof typeof customSettings.angles]);
+          
+          if (anglesToGenerate.length === 0) return;
+
+          anglesToGenerate.forEach(angle => {
+              let enhancedTitle = '';
+              let finalPrompt = '';
+
+              if (angle === 'front') {
+                  enhancedTitle = 'Enhanced Front View';
+                  finalPrompt = stylePrompt;
+              } else {
+                  enhancedTitle = `Generated ${angle.charAt(0).toUpperCase() + angle.slice(1).replace(/([A-Z])/g, ' $1')} View`;
+                  finalPrompt = `Based on the provided image, ${anglePrompts[angle as keyof typeof anglePrompts]}. Then, enhance this newly generated view using these style requirements:\n${stylePrompt}`;
               }
+
+              const newPair: ImagePair = {
+                  ...sourcePair,
+                  id: `${sourcePair.id}-res-${angle}`, // Unique ID for this result
+                  sourceId: sourcePair.id,
+                  enhancedTitle: enhancedTitle,
+                  isLoading: true,
+                  enhanced: null,
+                  error: null,
+                  isSelected: false,
+              };
+              newResultPairs.push(newPair);
+              jobs.push({ pair: newPair, prompt: finalPrompt });
           });
       });
+
 
       if (jobs.length === 0) {
         setToastMessage("No enhancements or angles selected.");
@@ -351,10 +443,10 @@ const App: React.FC = () => {
       setEnhancingMode('custom');
       setProgress({ completed: 0, total: jobs.length });
       
-      const idsToProcess = new Set(jobs.map(j => j.pair.id));
-      const pairsWithLoading = imagePairs.map(p => idsToProcess.has(p.id) ? {...p, isLoading: true, error: null} : p);
-      
-      setImagePairs([...pairsWithLoading.filter(p => !p.id.includes('-gen-')), ...newGeneratedPairs]);
+      setImagePairs(currentPairs => [
+          ...currentPairs,
+          ...newResultPairs
+      ]);
       
       await runEnhancement(jobs, customSettings.outputFormat, () => {
           setProgress(prev => ({ ...prev, completed: prev.completed + 1 }));
@@ -362,16 +454,14 @@ const App: React.FC = () => {
       
       setEnhancingMode(null);
       setProgress({ completed: 0, total: 0 });
-      
-      setImagePairs(currentPairs => 
-        currentPairs.map(p => 
-            (p.enhanced || p.error) ? { ...p, isLoading: false } : p
-        )
-    );
   }
   
   const handleRemoveImage = (id: string) => {
     setImagePairs(prev => prev.filter(p => p.id !== id));
+  };
+  
+  const handleRemoveGroup = (sourceId: string) => {
+      setImagePairs(prev => prev.filter(p => p.sourceId !== sourceId));
   };
 
   const handleClearSession = () => {
@@ -382,6 +472,7 @@ const App: React.FC = () => {
     // Clear all data
     setImagePairs([]);
     setLikedImages([]); // This will also clear localStorage via the useEffect
+    setImageCounter(1);
     
     // Reset settings
     setCustomSettings(defaultCustomSettings);
@@ -497,19 +588,29 @@ const App: React.FC = () => {
             const blob = await (await fetch(dataUrl)).blob();
             const file = new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' });
             
+            closeCamera();
+            setToastMessage('Identifying captured image...');
+
+            const ornamentType = await getOrnamentType(file);
+            
+            const newId = `${file.name}-${Date.now()}`;
             const newPair: ImagePair = {
-              id: `${file.name}-${Date.now()}`,
+              id: newId,
+              sourceId: newId,
               original: dataUrl,
               originalFile: file,
               enhanced: null,
               isLoading: false,
               error: null,
               isSelected: false,
-              title: 'Original View'
+              title: `Original ${ornamentType} View ${imageCounter}`
             };
             setImagePairs(prev => [...prev, newPair]);
+            setImageCounter(prev => prev + 1);
+            setToastMessage('Image added.');
+        } else {
+          closeCamera();
         }
-        closeCamera();
     }
   };
   
@@ -635,10 +736,20 @@ const App: React.FC = () => {
       prev.map(p => (p.id === id ? { ...p, isSelected: !p.isSelected } : p))
     );
   };
+  
+  const groupedPairs = imagePairs.reduce((acc, pair) => {
+      if (!acc[pair.sourceId]) {
+          acc[pair.sourceId] = [];
+      }
+      acc[pair.sourceId].push(pair);
+      return acc;
+  }, {} as Record<string, ImagePair[]>);
 
   const selectedCount = imagePairs.filter(p => p.isSelected).length;
   const selectedLikedCount = likedImages.filter(p => p.isSelected).length;
-  const unenhancedCount = imagePairs.filter(p => !p.enhanced && !p.isLoading).length;
+  
+  const sourceIdsWithResults = new Set(imagePairs.filter(p => p.id !== p.sourceId).map(p => p.sourceId));
+  const unenhancedCount = imagePairs.filter(p => p.id === p.sourceId && !sourceIdsWithResults.has(p.id)).length;
   
   const autoEnhanceText = enhancingMode === 'auto' 
     ? `Enhancing (${progress.completed}/${progress.total})`
@@ -853,44 +964,67 @@ const App: React.FC = () => {
             <p>Upload or take photos to begin the transformation.</p>
           </div>
         )}
-        {imagePairs.map(pair => (
-          <div className="enhancement-pair" key={pair.id}>
-            <div className="image-card">
-              <h2>{pair.title}</h2>
-               <button className="btn-remove" onClick={() => handleRemoveImage(pair.id)} aria-label={`Remove ${pair.title}`}>&times;</button>
-              <div className="image-placeholder">
-                <img src={pair.original} alt={`Original ${pair.title}`} />
-              </div>
-            </div>
-            <div className="image-card">
-              <h2>{pair.enhancedTitle || 'Enhanced'}</h2>
-              {pair.enhanced && (
-                 <button 
-                    className={`btn-like ${likedImages.some(p => p.id === pair.id) ? 'liked' : ''}`} 
-                    onClick={() => handleToggleLike(pair)} 
-                    aria-label="Like this image">
-                    {likedImages.some(p => p.id === pair.id) ? '❤️' : '🤍'}
-                </button>
-              )}
-              <div className="image-placeholder enhanced-zoom" aria-live="polite" onMouseMove={pair.enhanced ? handleZoom : undefined} onMouseLeave={pair.enhanced ? handleZoomExit : undefined}>
-                {pair.isLoading && (
-                  <div className="loading-state-container" aria-label="Loading enhanced image">
-                    <p className="loading-text">Pls hold your images on the way</p>
-                  </div>
-                )}
-                {pair.error && <div className="error-message" role="alert">{pair.error}</div>}
-                {pair.enhanced && <img src={pair.enhanced} alt={`AI Enhanced ${pair.title}`} />}
-                {!pair.isLoading && !pair.enhanced && !pair.error && <span>Enhanced image will appear here</span>}
-              </div>
-              {pair.enhanced && (
-                <div className="selection-control">
-                  <input type="checkbox" id={`select-${pair.id}`} checked={pair.isSelected} onChange={() => handleToggleSelection(pair.id)} />
-                  <label htmlFor={`select-${pair.id}`}>Select to Download</label>
+        {Object.values(groupedPairs).map(group => {
+            if (group.length === 0) return null;
+            
+            const sourceImage = group.find(p => p.id === p.sourceId);
+            const resultImages = group.filter(p => p.id !== p.sourceId);
+
+            if (!sourceImage) return null;
+
+            return (
+                <div className="enhancement-group" key={sourceImage.sourceId}>
+                    <div className="image-card">
+                        <h2>{sourceImage.title}</h2>
+                        <button className="btn-remove" onClick={() => handleRemoveGroup(sourceImage.sourceId)} aria-label={`Remove ${sourceImage.title} and all its results`}>&times;</button>
+                        <div className="image-placeholder enhanced-zoom" onMouseMove={handleZoom} onMouseLeave={handleZoomExit}>
+                            <img src={sourceImage.original} alt={`Original ${sourceImage.title}`} />
+                        </div>
+                    </div>
+                    <div className="enhanced-results-grid">
+                        {resultImages.length === 0 && (
+                             <div className="image-card">
+                                <h2>Enhanced</h2>
+                                <div className="image-placeholder">
+                                    <div className="loading-state-container">
+                                        <p className="placeholder-text">Enhanced image will appear here</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        {resultImages.map(pair => (
+                            <div className="image-card" key={pair.id}>
+                                <h2>{pair.enhancedTitle || 'Enhanced'}</h2>
+                                {pair.enhanced && (
+                                    <button 
+                                        className={`btn-like ${likedImages.some(p => p.id === pair.id) ? 'liked' : ''}`} 
+                                        onClick={() => handleToggleLike(pair)} 
+                                        aria-label="Like this image">
+                                        {likedImages.some(p => p.id === pair.id) ? '❤️' : '🤍'}
+                                    </button>
+                                )}
+                                <button className="btn-remove" onClick={() => handleRemoveImage(pair.id)} aria-label={`Remove ${pair.enhancedTitle || 'this result'}`}>&times;</button>
+                                <div className="image-placeholder enhanced-zoom" aria-live="polite" onMouseMove={pair.enhanced ? handleZoom : undefined} onMouseLeave={pair.enhanced ? handleZoomExit : undefined}>
+                                    {pair.isLoading && (
+                                    <div className="loading-state-container" aria-label="Loading enhanced image">
+                                        <p className="loading-text">Pls hold your images on the way</p>
+                                    </div>
+                                    )}
+                                    {pair.error && <div className="error-message" role="alert">{pair.error}</div>}
+                                    {pair.enhanced && <img src={pair.enhanced} alt={`AI Enhanced ${pair.title}`} />}
+                                </div>
+                                {pair.enhanced && (
+                                    <div className="selection-control">
+                                    <input type="checkbox" id={`select-${pair.id}`} checked={pair.isSelected} onChange={() => handleToggleSelection(pair.id)} />
+                                    <label htmlFor={`select-${pair.id}`}>Select to Download</label>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
                 </div>
-              )}
-            </div>
-          </div>
-        ))}
+            );
+        })}
       </div>
     </div>
   );
