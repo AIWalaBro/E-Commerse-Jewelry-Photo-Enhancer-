@@ -12,6 +12,7 @@ interface ImagePair {
   error: string | null;
   isSelected: boolean;
   title: string;
+  enhancedTitle?: string;
 }
 
 interface CustomSettings {
@@ -25,6 +26,7 @@ interface CustomSettings {
     };
     background: 'velvet' | 'marble' | 'abstract' | 'whiteStudio' | 'gradient';
     lighting: 'soft' | 'dramatic' | 'natural' | 'highKey' | 'shadowed';
+    material: 'auto' | 'gold' | 'silver' | 'platinum';
     outputFormat: 'jpeg' | 'png' | 'webp';
 }
 
@@ -32,6 +34,7 @@ const defaultCustomSettings: CustomSettings = {
     angles: { front: true, side: false, top: false, threeQuarter: false, closeUp: false, back: false },
     background: 'velvet',
     lighting: 'soft',
+    material: 'auto',
     outputFormat: 'jpeg',
 };
 
@@ -244,12 +247,16 @@ const App: React.FC = () => {
         idsToProcess.has(p.id) ? { ...p, isLoading: true, error: null } : p
       )
     );
+    const basePrompt = `You are an expert jewelry photo retoucher.
+     Your task is to enhance the provided image of a jewelry ornament for a high-end e-commerce website. Follow these instructions precisely: Enhance this photo of jewelry to look like a professional studio shoot. Use soft, luxurious lighting, remove background clutter, and place the jewelry on a rich velvet cloth or marble surface. Add subtle reflections and shadows to highlight shine and texture. Make it suitable for e-commerce display with high clarity and elegance.
 
-    const basePrompt = `Task: Act as an expert jewelry image retoucher.
-    1.  **Inspect and Correct Imperfections:** Identify and remove any scratches, blemishes, dust, or surface flaws on the ornament. The final image must display a flawless, clean, and polished surface, making the jewelry look brand new.
-    2.  **Preserve Orientation and Angle:** Maintain the exact perspective and angle of the original photo. The enhanced output must match the orientation and position as seen in the input image. Do not change the camera angle.
-    3.  **Accurately Render Material and Gemstones:** Precisely detect and retain the original material and color. If the ornament is silver, produce a realistic silver color. If it's gold, reflect the correct gold hue. For any diamonds or gemstones, enhance their sparkle and clarity so they appear vivid and sharp, but do not change the stone type, color, or cut.
-    4.  **Produce a High-Quality Studio-Ready Image:** Enhance the background, lighting, and clarity to professional e-commerce standards. Place the ornament on a clean, luxurious surface (like dark velvet or soft marble) with natural shadows and crisp details. The final image should be visually appealing without altering the essential attributes of the jewelry.`;
+    `;
+
+    // const basePrompt = `Task: Act as an expert jewelry image retoucher.
+    // 1.  **Inspect and Correct Imperfections:** Identify and remove any scratches, blemishes, dust, or surface flaws on the ornament. The final image must display a flawless, clean, and polished surface, making the jewelry look brand new.
+    // 2.  **Preserve Orientation and Angle:** Maintain the exact perspective and angle of the original photo. The enhanced output must match the orientation and position as seen in the input image. Do not change the camera angle.
+    // 3.  **Accurately Render Material and Gemstones:** Precisely detect and retain the original material and color. If the ornament is silver, produce a realistic silver color. If it's gold, reflect the correct gold hue. For any diamonds or gemstones, enhance their sparkle and clarity so they appear vivid and sharp, but do not change the stone type, color, or cut.
+    // 4.  **Produce a High-Quality Studio-Ready Image:** Enhance the background, lighting, and clarity to professional e-commerce standards. Place the ornament on a clean, luxurious surface (like dark velvet or soft marble) with natural shadows and crisp details. The final image should be visually appealing without altering the essential attributes of the jewelry.`;
 
     const jobs: {pair: ImagePair, prompt: string}[] = uploadedPairs.map(p => ({ pair: p, prompt: basePrompt }));
 
@@ -272,38 +279,45 @@ const App: React.FC = () => {
       const uploadedPairs = imagePairs.filter(p => !p.enhanced && !p.isLoading);
       if (uploadedPairs.length === 0 || enhancingMode) return;
       
-      let prompt = `Task: Enhance a photo of gold jewelry for e-commerce. It must have high clarity and elegance.
-      Style requirements:
-      `;
+      let baseTask = '';
+      if (customSettings.material === 'auto') {
+          baseTask = `Task: Enhance this jewelry photo for e-commerce. The ornament’s material and color should be faithfully preserved as seen in the image. The output must have high clarity, flawless presentation, and elegant studio quality.`;
+      } else {
+          baseTask = `Task: Transform the jewelry in the provided photo to be made of high-quality, polished ${customSettings.material}. Faithfully preserve the exact physical structure, dimensions, and design details of the ornament, but change its material. The output must have high clarity, flawless presentation, and elegant studio quality, realistically rendering the new ${customSettings.material} material.`;
+      }
+      
+      let styleRequirements = `Style requirements:\n`;
       switch (customSettings.lighting) {
-          case 'dramatic': prompt += '- Lighting: Use dramatic, bold lighting with high contrast and deep shadows. '; break;
-          case 'natural': prompt += '- Lighting: Use clean and natural lighting, like from a soft daylight window. '; break;
-          case 'highKey': prompt += '- Lighting: Use high-key lighting for a bright, airy, and shadowless look. '; break;
-          case 'shadowed': prompt += '- Lighting: Use specific, directed lighting to create long, artistic shadows. '; break;
-          default: prompt += '- Lighting: Use soft, luxurious lighting to highlight shine and texture. '; break;
+          case 'dramatic': styleRequirements += 'Lighting: Use dramatic, bold lighting with high contrast and deep shadows.\n'; break;
+          case 'natural': styleRequirements += 'Lighting: Use clean and natural lighting, like from a soft daylight window.\n'; break;
+          case 'highKey': styleRequirements += 'Lighting: Use high-key lighting for a bright, airy, and shadowless look.\n'; break;
+          case 'shadowed': styleRequirements += 'Lighting: Use specific, directed lighting to create long, artistic shadows.\n'; break;
+          default: styleRequirements += 'Lighting: Use soft, luxurious lighting to highlight shine and texture.\n'; break;
       }
       switch (customSettings.background) {
-          case 'marble': prompt += '- Background: Place the jewelry on a clean white or black marble surface. '; break;
-          case 'abstract': prompt += '- Background: Place the jewelry on a minimal, abstract, out-of-focus background. '; break;
-          case 'whiteStudio': prompt += '- Background: Place the jewelry against a seamless, pure white studio background. '; break;
-          case 'gradient': prompt += '- Background: Place the jewelry against a subtle, elegant color gradient background. '; break;
-          default: prompt += '- Background: Place the jewelry on a rich, dark velvet cloth. '; break;
+          case 'marble': styleRequirements += 'Background: Place the jewelry on a clean white or black marble surface.'; break;
+          case 'abstract': styleRequirements += 'Background: Place the jewelry on a minimal, abstract, out-of-focus background.'; break;
+          case 'whiteStudio': styleRequirements += 'Background: Place the jewelry against a seamless, pure white studio background.'; break;
+          case 'gradient': styleRequirements += 'Background: Place the jewelry against a subtle, elegant color gradient background.'; break;
+          default: styleRequirements += 'Background: Place the jewelry on a rich, dark velvet cloth.'; break;
       }
+
+      const stylePrompt = `${baseTask}\n${styleRequirements}`;
 
       let jobs: {pair: ImagePair, prompt: string}[] = [];
       const newGeneratedPairs: ImagePair[] = [];
 
       // Add jobs to enhance the originally uploaded images if 'Front View' is checked
       if (customSettings.angles.front) {
-          uploadedPairs.forEach(p => jobs.push({ pair: p, prompt }));
+          uploadedPairs.forEach(p => jobs.push({ pair: p, prompt: stylePrompt }));
       }
 
       const anglePrompts = {
-          side: "generate a realistic side view of the jewelry",
-          top: "generate a realistic top-down view of the jewelry",
-          threeQuarter: "generate a realistic 3/4 three-quarter view of the jewelry",
-          closeUp: "generate a detailed close-up macro shot of the jewelry, focusing on craftsmanship",
-          back: "generate a realistic back view of the jewelry"
+        side: "Task: Re-render the jewelry from a realistic side-view camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
+        top: "Task: Re-render the jewelry from a realistic top-down camera angle (bird's-eye view). Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
+        threeQuarter: "Task: Re-render the jewelry from a realistic three-quarter (3/4) camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*.",
+        closeUp: "Task: Generate a detailed close-up macro shot of the jewelry, focusing on a key area of craftsmanship like the gemstone setting or clasp. You must preserve the exact physical structure, materials, and design details of the ornament shown in the original image. Do not change the object's shape. The goal is a photorealistic zoomed-in view of the *same object*.",
+        back: "Task: Re-render the jewelry from a realistic back-view camera angle. Crucially, you must preserve the exact physical structure, dimensions, materials, and design details of the ornament shown in the original image, logically inferring the appearance of the back. Do not change the object's shape or add/remove features. The goal is a photorealistic change in perspective of the *same object*."
       };
       
       // Generate new angles for EACH uploaded image
@@ -311,18 +325,20 @@ const App: React.FC = () => {
           (Object.keys(anglePrompts) as (keyof typeof anglePrompts)[]).forEach(angle => {
               const angleKey = angle as keyof CustomSettings['angles'];
               if (customSettings.angles[angleKey]) {
-                  const title = `Generated ${angle.charAt(0).toUpperCase() + angle.slice(1)} View`;
+                  const enhancedTitle = `Generated ${angle.charAt(0).toUpperCase() + angle.slice(1).replace(/([A-Z])/g, ' $1')} View`;
                   const newPair: ImagePair = { 
                       ...sourcePair, 
                       id: `${sourcePair.id}-gen-${angle}`, 
-                      title, 
+                      title: sourcePair.title,
+                      enhancedTitle: enhancedTitle,
                       isLoading: true, 
                       enhanced: null, 
                       error: null, 
                       isSelected: false 
                   };
                   newGeneratedPairs.push(newPair);
-                  jobs.push({ pair: newPair, prompt: `Based on the provided image, ${anglePrompts[angle]}. Then, enhance this newly generated view using these style requirements: ${prompt}`});
+                  const angleGenPrompt = `Based on the provided image, ${anglePrompts[angle]}. Then, enhance this newly generated view using these style requirements:\n${stylePrompt}`;
+                  jobs.push({ pair: newPair, prompt: angleGenPrompt });
               }
           });
       });
@@ -667,6 +683,27 @@ const App: React.FC = () => {
         <div className="custom-modal-overlay" onClick={() => setIsCustomModalOpen(false)}>
             <div className="custom-modal-content" onClick={e => e.stopPropagation()}>
                 <h2>Customize Your Enhancement</h2>
+                 <fieldset>
+                    <legend>Material Transformation</legend>
+                    <div className="checkbox-group">
+                        <label>
+                            <input type="radio" name="material" value="auto" checked={customSettings.material === 'auto'} onChange={e => setCustomSettings(s => ({...s, material: e.target.value as any}))} />
+                            Auto-detect (Keep Original)
+                        </label>
+                         <label>
+                            <input type="radio" name="material" value="gold" checked={customSettings.material === 'gold'} onChange={e => setCustomSettings(s => ({...s, material: e.target.value as any}))} />
+                            Gold
+                        </label>
+                         <label>
+                            <input type="radio" name="material" value="silver" checked={customSettings.material === 'silver'} onChange={e => setCustomSettings(s => ({...s, material: e.target.value as any}))} />
+                            Silver
+                        </label>
+                         <label>
+                            <input type="radio" name="material" value="platinum" checked={customSettings.material === 'platinum'} onChange={e => setCustomSettings(s => ({...s, material: e.target.value as any}))} />
+                            Platinum
+                        </label>
+                    </div>
+                </fieldset>
                 <fieldset>
                     <legend>Choose Angles</legend>
                     <small>Enhance uploaded views and generate any additional selected angles.</small>
@@ -826,7 +863,7 @@ const App: React.FC = () => {
               </div>
             </div>
             <div className="image-card">
-              <h2>Enhanced</h2>
+              <h2>{pair.enhancedTitle || 'Enhanced'}</h2>
               {pair.enhanced && (
                  <button 
                     className={`btn-like ${likedImages.some(p => p.id === pair.id) ? 'liked' : ''}`} 
