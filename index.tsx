@@ -304,14 +304,29 @@ const App: React.FC = () => {
     setEnhancingMode('auto');
     setProgress({ completed: 0, total: sourcePairsToProcess.length });
 
-    const basePrompt = `You are an expert jewelry photo retoucher.
-     Your task is to enhance the provided image of a jewelry ornament for a high-end e-commerce website. Follow these instructions precisely:
-     1.  **Completely remove the original background.** Ensure no part of the original background is visible.
-     2.  Place the jewelry on a new, clean background. Choose either a rich velvet cloth or a marble surface, whichever best suits the item.
-     3.  Apply soft, luxurious lighting to highlight shine and texture.
-     4.  Add subtle reflections and shadows for realism.
-     The final image must have high clarity and elegance, suitable for a professional e-commerce display.
-    `;
+    // const basePrompt = `You are an expert jewelry photo retoucher.
+    //  Your task is to enhance the provided image of a jewelry ornament for a high-end e-commerce website. Follow these instructions precisely:
+    //  1.  **Completely remove the original background.** Ensure no part of the original background is visible.
+    //  2.  Place the jewelry on a new, clean background. Choose either a rich velvet cloth or a marble surface, whichever best suits the item.
+    //  3.  Apply soft, luxurious lighting to highlight shine and texture.
+    //  4.  Add subtle reflections and shadows for realism.
+    //  The final image must have high clarity and elegance, suitable for a professional e-commerce display.
+    // `;
+
+    const basePrompt =`You are a world-class jewelry photo retoucher specializing in high-end e-commerce presentation.
+
+  Your task is to transform the provided image of a jewelry ornament into a visually stunning, premium-quality product photo. Follow these instructions with meticulous attention to detail:
+
+  1. **Remove the original background entirely.** No trace of the original setting should remain.
+  2. **Replace the background** with one of the following:
+    - A deep, rich velvet cloth in black, royal blue, or burgundy.
+    - A polished marble surface in white or soft grey tones.
+    Choose the option that best complements the jewelry’s material and color.
+  3. **Apply soft, diffused lighting** to accentuate the brilliance, texture, and craftsmanship of the piece. Avoid harsh shadows or overexposure.
+  4. **Add elegant, realistic shadows and subtle reflections** beneath the jewelry to enhance depth and dimensionality.
+  5. Ensure the final image has **exceptional clarity, refined contrast, and a luxurious finish**—suitable for a premium e-commerce storefront or luxury catalog.
+
+  The result should evoke sophistication, trust, and desire—inviting the viewer to appreciate the artistry and value of the jewelry.`;
     
     const newResultPairs: ImagePair[] = [];
     const jobs: {pair: ImagePair, prompt: string}[] = [];
